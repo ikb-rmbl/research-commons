@@ -18,7 +18,7 @@
 import './lib/config.js'
 import { sleep } from './lib/concurrency.js'
 import { saveDiscoveredPublications } from './lib/publication-discovery.js'
-import { parseAuthorString, type ParsedAuthor } from './lib/author-parsing.js'
+import { parseCreatorName, type ParsedAuthor } from './lib/author-parsing.js'
 import type { NormalizedPublication } from './lib/types.js'
 
 const groupArg = process.argv.find((a) => a.startsWith('--group='))?.split('=')[1]
@@ -49,7 +49,7 @@ function zoteroCreators(creators: any[] | undefined): ParsedAuthor[] {
     if (c.lastName) {
       out.push({ family: c.lastName, given: c.firstName || '' })
     } else if (c.name) {
-      out.push(...parseAuthorString(c.name))
+      out.push(parseCreatorName(c.name))
     }
   }
   return out

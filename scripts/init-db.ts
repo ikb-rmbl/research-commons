@@ -5,7 +5,7 @@
  * Run via: npm run setup   (or directly: PAYLOAD_PUSH=true npx tsx scripts/init-db.ts)
  */
 
-import { execSync } from 'child_process'
+import './lib/config.js' // loads .env
 import { readFileSync } from 'fs'
 import pg from 'pg'
 import { getPayload } from 'payload'

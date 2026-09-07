@@ -28,7 +28,7 @@ async function main() {
   await ensureAuth()
 
   const stories = JSON.parse(readFileSync(path, 'utf-8'))
-  const existing = await getAllPaginated('stories', ['sourceUrl'])
+  const existing = await getAllPaginated('stories')
   const seen = new Set(existing.map((s: any) => s.sourceUrl).filter(Boolean))
 
   // tombstones: admin-deleted stories stay deleted

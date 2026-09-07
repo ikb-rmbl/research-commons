@@ -260,7 +260,8 @@ export const Publications: CollectionConfig = {
       required: true,
       defaultValue: 'manual',
       options: [
-                { label: 'Discovered', value: 'discovered' },
+        { label: 'Imported', value: 'imported' },
+        { label: 'Discovered', value: 'discovered' },
         { label: 'Manual', value: 'manual' },
       ],
       admin: {
@@ -272,11 +273,13 @@ export const Publications: CollectionConfig = {
       name: 'discoveryMethod',
       type: 'select',
       required: true,
-      defaultValue: 'manual',
+      defaultValue: 'manual_entry',
       options: [
-                { label: 'OpenAlex Geographic', value: 'openalex_geo' },
+        { label: 'OpenAlex', value: 'openalex_geo' },
         { label: 'CrossRef Citation', value: 'crossref_citation' },
         { label: 'CrossRef Affiliation', value: 'crossref_affiliation' },
+        { label: 'Zotero Import', value: 'zotero' },
+        { label: 'Generic Import', value: 'import' },
         { label: 'Manual Entry', value: 'manual_entry' },
       ],
       admin: {
