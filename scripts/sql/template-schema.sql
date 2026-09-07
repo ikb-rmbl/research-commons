@@ -107,3 +107,20 @@ CREATE TABLE IF NOT EXISTS duplicate_tombstones (
   deleted_at timestamptz DEFAULT now(),
   notes text
 );
+
+-- ----------------------------------------------------------------------------
+-- Content chunks: per-item embedding records (generate-embeddings.ts writes
+-- summary-level chunks here alongside the datasets/publications embedding col)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS content_chunks (
+  id serial PRIMARY KEY,
+  collection text NOT NULL,
+  item_id int NOT NULL,
+  chunk_index int NOT NULL DEFAULT 0,
+  chunk_text text,
+  embedding vector(1024),
+  embedding_model text,
+  chunk_method text,
+  created_at timestamptz DEFAULT now(),
+  UNIQUE (collection, item_id, chunk_index)
+);

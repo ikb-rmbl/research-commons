@@ -17,11 +17,6 @@ const DATA_FORMAT_OPTIONS = [
   { label: 'Other', value: 'other' },
 ]
 
-const REPOSITORY_OPTIONS = [
-  { label: 'S3', value: 's3' },
-  { label: 'ESS-DIVE', value: 'ess_dive' },
-  { label: 'Other', value: 'other' },
-]
 
 const RESOURCE_TYPE_OPTIONS = [
   { label: 'Dataset', value: 'dataset' },
@@ -166,8 +161,8 @@ export const Datasets: CollectionConfig = {
     },
     {
       name: 'repository',
-      type: 'select',
-      options: REPOSITORY_OPTIONS,
+      type: 'text',
+      admin: { description: 'Repository name (Zenodo, Dryad, ESS-DIVE, your institutional repo…)' },
     },
     {
       name: 'externalCatalogUrl',

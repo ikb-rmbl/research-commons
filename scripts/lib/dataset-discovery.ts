@@ -5,7 +5,7 @@
  * and normalization utilities shared across all discovery sources.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs'
 import { OUTPUT_DIR } from './config.js'
 import { titleSimilarity } from './doi-utils.js'
 import type { NormalizedDataset } from './types.js'

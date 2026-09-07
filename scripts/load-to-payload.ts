@@ -87,6 +87,12 @@ async function seedTopics() {
     return
   }
 
+  // Topics taxonomy is optional — provide scripts/output/topics-seed.json
+  // ([{name, parent}]) to seed one, or manage topics in the admin UI.
+  if (!existsSync(`${OUTPUT_DIR}/topics-seed.json`)) {
+    console.log('  No topics-seed.json — skipping topic seeding (optional)')
+    return
+  }
   const topics: { name: string; parent: string | null }[] = JSON.parse(
     readFileSync(`${OUTPUT_DIR}/topics-seed.json`, 'utf-8'),
   )
@@ -422,8 +428,15 @@ async function loadDatasets() {
   let datasets: any[]
 
   if (existingCount === 0) {
-    // Fresh load
-    datasets = JSON.parse(readFileSync(`${OUTPUT_DIR}/data-catalog-normalized.json`, 'utf-8'))
+    // Fresh load: merge the optional base file with everything discovered
+    datasets = existsSync(`${OUTPUT_DIR}/data-catalog-normalized.json`)
+      ? JSON.parse(readFileSync(`${OUTPUT_DIR}/data-catalog-normalized.json`, 'utf-8'))
+      : []
+    for (const f of readdirSync(OUTPUT_DIR).filter((f) => f.startsWith('datasets-discovered') && f.endsWith('.json'))) {
+      const found = JSON.parse(readFileSync(`${OUTPUT_DIR}/${f}`, 'utf-8'))
+      datasets.push(...found)
+      console.log(`  Merged ${found.length} from ${f}`)
+    }
     const beforeTomb = datasets.length
     datasets = datasets.filter((d) => !isTombstoned('datasets', d, tombstones))
     if (beforeTomb !== datasets.length) console.log(`  ${beforeTomb - datasets.length} skipped (tombstoned)`)

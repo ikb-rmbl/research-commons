@@ -31,7 +31,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
   let total = 0
   for (const t of targets) {
     const { table } = TYPES[t]
-    const dateCol = table === 'publications' ? 'year::text' : table === 'datasets' ? 'publication_year::text' : `to_char(date, 'YYYY')`
+    const dateCol = table === 'publications' ? 'year::text' : table === 'datasets' ? 'publication_year::text' : table === 'documents' ? `to_char(date_original, 'YYYY')` : `to_char(date, 'YYYY')`
     const where = q ? `search_vector @@ websearch_to_tsquery('english', $1)` : 'TRUE'
     const rank = q ? `ts_rank(search_vector, websearch_to_tsquery('english', $1))` : '0'
     const args = q ? [q] : []

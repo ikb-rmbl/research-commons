@@ -42,7 +42,7 @@ export default async function DatasetsPage({ searchParams }: { searchParams: Pro
          ORDER BY publication_year DESC NULLS LAST, id DESC
          LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`, args),
       db.query(`SELECT count(*)::int AS n FROM datasets WHERE ${where}`, args),
-      db.query(`SELECT repository AS v, count(*)::int AS n FROM datasets WHERE repository IS NOT NULL AND repository <> '' GROUP BY 1 ORDER BY n DESC LIMIT 8`),
+      db.query(`SELECT repository AS v, count(*)::int AS n FROM datasets WHERE repository IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 8`),
       db.query(`SELECT v, count(*)::int AS n FROM (SELECT unnest(variables) AS v FROM datasets) u GROUP BY 1 ORDER BY n DESC LIMIT 12`),
       db.query(`SELECT v, count(*)::int AS n FROM (SELECT unnest(keywords) AS v FROM datasets) u GROUP BY 1 ORDER BY n DESC LIMIT 12`),
     ])
