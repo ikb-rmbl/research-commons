@@ -73,7 +73,10 @@ export default buildConfig({
     pool: {
       connectionString: process.env.DATABASE_URL,
     },
-    push: false, // Don't auto-push schema changes (preserves custom tsvector, embeddings, etc.)
+    // push:false preserves the custom SQL layer (tsvector, embeddings, text[]
+    // columns). scripts/init-db.ts sets PAYLOAD_PUSH=true ONCE to create the
+    // Payload tables; never leave it on in normal operation.
+    push: process.env.PAYLOAD_PUSH === 'true',
   }),
   sharp,
   plugins,

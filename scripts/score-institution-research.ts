@@ -26,9 +26,18 @@ async function main() {
       WHERE institution_research IS NULL
     `)
     console.log(`${rows.length} unreviewed publications to score${apply ? '' : ' (dry run — add --apply to write)'}`)
+    const { rows: authorRows } = await db.query(
+      `SELECT _parent_id AS pub_id, family, given FROM publications_authors`,
+    )
+    const authorsByPub = new Map<number, { family: string; given: string | null }[]>()
+    for (const a of authorRows) {
+      if (!authorsByPub.has(a.pub_id)) authorsByPub.set(a.pub_id, [])
+      authorsByPub.get(a.pub_id)!.push(a)
+    }
     let written = 0
     for (const p of rows) {
-      const { score } = await scorePublication(db, ctx, p)
+      const text = `${p.title ?? ''} ${p.abstract ?? ''} ${p.journal ?? ''}`.toLowerCase()
+      const { score } = scorePublication(p.id, text, authorsByPub.get(p.id) ?? [], ctx)
       if (apply) {
         await db.query(`UPDATE publications SET institution_research_score = $1 WHERE id = $2`, [score, p.id])
         written++

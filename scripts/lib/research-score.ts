@@ -46,14 +46,18 @@ export async function buildScoringContext(db: pg.Pool): Promise<ScoringContext> 
     if (!knownAuthors.has(k)) knownAuthors.set(k, new Set())
     knownAuthors.get(k)!.add(a.pub_id)
   }
-  const { rows: pis } = await db.query(`SELECT pi FROM projects WHERE pi IS NOT NULL AND pi <> ''`)
+  // PI roster signal: optional — if you maintain a projects table with a
+  // `pi` column (as RMBL does), names here boost papers by current PIs.
   const piKeys = new Set<string>()
-  for (const { pi } of pis) {
-    for (const name of String(pi).split(/[,;&]| and /)) {
-      const parts = name.trim().split(/\s+/)
-      if (parts.length >= 2) piKeys.add(nameKey(parts[parts.length - 1], parts[0]))
+  try {
+    const { rows: pis } = await db.query(`SELECT pi FROM projects WHERE pi IS NOT NULL AND pi <> ''`)
+    for (const { pi } of pis) {
+      for (const name of String(pi).split(/[,;&]| and /)) {
+        const parts = name.trim().split(/\s+/)
+        if (parts.length >= 2) piKeys.add(nameKey(parts[parts.length - 1], parts[0]))
+      }
     }
-  }
+  } catch { /* no projects table — signal contributes 0 */ }
   return { knownAuthors, piKeys }
 }
 
