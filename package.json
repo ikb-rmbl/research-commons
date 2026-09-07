@@ -1,0 +1,45 @@
+{
+  "name": "research-commons",
+  "version": "0.1.0",
+  "description": "A template for institutional research-output portals: publications, datasets, documents, and news, with automated discovery and optional LLM enrichment. Built from the RMBL Knowledge Commons.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "cross-env NODE_OPTIONS=--no-deprecation next dev",
+    "build": "cross-env NODE_OPTIONS=--no-deprecation next build",
+    "start": "cross-env NODE_OPTIONS=--no-deprecation next start",
+    "lint": "next lint",
+    "test": "vitest run",
+    "payload": "cross-env NODE_OPTIONS=--no-deprecation payload",
+    "setup": "bash scripts/setup-local.sh",
+    "discover": "tsx scripts/discover-publications.ts && tsx scripts/discover-datasets.ts",
+    "pipeline": "tsx scripts/pipeline.ts"
+  },
+  "dependencies": {
+    "@payloadcms/db-postgres": "^3.80.0",
+    "@payloadcms/next": "^3.80.0",
+    "@payloadcms/richtext-lexical": "^3.80.0",
+    "@payloadcms/storage-s3": "^3.80.0",
+    "@payloadcms/ui": "^3.80.0",
+    "cross-env": "^7.0.3",
+    "graphql": "^16.8.1",
+    "next": "^16.2.1",
+    "payload": "^3.80.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sharp": "^0.34.2",
+    "voyageai": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^19.0.1",
+    "eslint": "^9.16.0",
+    "eslint-config-next": "^16.2.1",
+    "pg": "^8.13.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": { "node": ">=22" }
+}
