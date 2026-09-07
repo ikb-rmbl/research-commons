@@ -17,7 +17,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
   const params = await searchParams
   const q = (params.q ?? '').slice(0, 200)
   const typeFilter = params.type && TYPES[params.type] ? params.type : null
-  const page = Math.max(1, parseInt(params.page ?? '1') || 1)
+  const page = Math.min(400, Math.max(1, parseInt(params.page ?? '1') || 1))
   const db = getDb()
 
   const enabledTypes = Object.keys(TYPES).filter(

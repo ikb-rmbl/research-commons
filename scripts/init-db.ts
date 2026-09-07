@@ -13,6 +13,13 @@ import { getPayload } from 'payload'
 process.env.PAYLOAD_PUSH = 'true'
 
 async function main() {
+  const adminPassword = process.env.PAYLOAD_ADMIN_PASSWORD
+  const WEAK_PASSWORDS = new Set(['change-me', 'changeme', 'password', 'admin', 'admin123'])
+  if (adminPassword && (adminPassword.length < 10 || WEAK_PASSWORDS.has(adminPassword.toLowerCase()))) {
+    console.error('PAYLOAD_ADMIN_PASSWORD is a default/weak value — set a real password (10+ chars) in .env and re-run')
+    process.exit(1)
+  }
+
   const { default: config } = await import('../src/payload.config.js')
   console.log('Creating Payload tables (one-time drizzle push)...')
   const payload = await getPayload({ config })

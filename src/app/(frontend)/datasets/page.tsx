@@ -13,7 +13,7 @@ const PAGE_SIZE = 25
 export default async function DatasetsPage({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams
   const db = getDb()
-  const page = Math.max(1, parseInt(params.page ?? '1') || 1)
+  const page = Math.min(400, Math.max(1, parseInt(params.page ?? '1') || 1))
 
   const clauses: string[] = ['TRUE']
   const args: any[] = []
@@ -28,8 +28,12 @@ export default async function DatasetsPage({ searchParams }: { searchParams: Pro
   if (params.variable) push(`variables @> ARRAY[$${i}]::text[]`, params.variable)
   if (params.keyword) push(`keywords @> ARRAY[$${i}]::text[]`, params.keyword)
   if (params.repo) push(`repository = $${i}`, params.repo)
-  if (params.from) push(`temporal_extent_end >= make_timestamptz($${i}::int, 1, 1, 0, 0, 0)`, parseInt(params.from))
-  if (params.to) push(`temporal_extent_start <= make_timestamptz($${i}::int, 12, 31, 0, 0, 0)`, parseInt(params.to))
+  const fromY = parseInt(params.from ?? '')
+  const toY = parseInt(params.to ?? '')
+  if (Number.isFinite(fromY) && fromY > 1600 && fromY < 2200)
+    push(`temporal_extent_end >= make_timestamptz($${i}::int, 1, 1, 0, 0, 0)`, fromY)
+  if (Number.isFinite(toY) && toY > 1600 && toY < 2200)
+    push(`temporal_extent_start <= make_timestamptz($${i}::int, 12, 31, 0, 0, 0)`, toY)
   const where = clauses.join(' AND ')
 
   const [{ rows }, { rows: [{ n: total }] }, { rows: repoFacet }, { rows: variableFacet }, { rows: keywordFacet }] =

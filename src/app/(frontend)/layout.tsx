@@ -9,6 +9,8 @@ export const metadata = {
   description: institution.tagline,
 }
 
+const safeColor = (c: string, fallback: string) => (/^#[0-9a-fA-F]{3,8}$/.test(c) ? c : fallback)
+
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const { brand, collections } = institution
   return (
@@ -16,10 +18,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <head>
         {/* Institution brand palette overrides the neutral defaults in styles.css */}
         <style>{`:root {
-          --accent: ${brand.accent};
-          --accent-hover: ${brand.accent};
-          --brand-cream: ${brand.background};
-          --color-header-bg: ${brand.headerBackground};
+          --accent: ${safeColor(brand.accent, '#2c5f7c')};
+          --accent-hover: ${safeColor(brand.accent, '#2c5f7c')};
+          --brand-cream: ${safeColor(brand.background, '#faf9f6')};
+          --color-header-bg: ${safeColor(brand.headerBackground, '#1d3d50')};
         }`}</style>
       </head>
       <body>

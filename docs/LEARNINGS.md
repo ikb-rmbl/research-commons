@@ -95,6 +95,13 @@ semantic search — it's an enhancement, not a prerequisite.
 cross-collection feature (author pages, co-authorship, provenance scoring)
 sits on the deduplicated registry. Invest there before anything fancy.
 
+**Security posture is single-admin by default.** The Users collection lets
+any logged-in user manage users — right for one-curator portals, wrong once
+you add staff accounts with different trust levels (add a role field then).
+Pipeline scripts refuse to send admin credentials to remote http:// URLs;
+keep production traffic on https. And `npm run setup` refuses default/weak
+admin passwords — that's deliberate, not a bug.
+
 **Small-org hosting should round to zero.** Vercel free/Pro + Neon free tier
 runs the whole thing; RMBL pays ~$20/month at 10× this template's default
 scale. Don't stand up Kubernetes for a portal.

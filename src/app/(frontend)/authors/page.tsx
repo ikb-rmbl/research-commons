@@ -7,7 +7,7 @@ const PAGE_SIZE = 60
 export default async function AuthorsPage({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams
   const db = getDb()
-  const page = Math.max(1, parseInt(params.page ?? '1') || 1)
+  const page = Math.min(400, Math.max(1, parseInt(params.page ?? '1') || 1))
   const q = (params.q ?? '').slice(0, 100)
 
   const where = q ? `display_name ILIKE $1` : 'TRUE'
