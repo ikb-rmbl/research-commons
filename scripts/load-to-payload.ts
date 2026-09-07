@@ -1,0 +1,582 @@
+/**
+ * Payload CMS Data Loader
+ *
+ * Loads all three collections into Payload via the REST API:
+ *   1. Seeds Topics taxonomy
+ *   2. Loads Documents (Sustainable Library)
+ *   3. Loads Publications
+ *   4. Loads Datasets (Data Catalog)
+ *
+ * Usage:
+ *   # Start the dev server first: npm run dev
+ *   npx tsx scripts/load-to-payload.ts [--collection=topics|documents|publications|datasets|all]
+ *
+ * The script creates an admin user on first run, then authenticates for all API calls.
+ * It is idempotent: records are matched by _sourceId/title and skipped if they already exist.
+ */
+
+import { institution } from '../config/institution.js'
+import { readFileSync, existsSync, readdirSync } from 'fs'
+import { runBatch } from './lib/concurrency.js'
+import {
+  ensureAuth,
+  authHeaders,
+  createRecord,
+  findByField,
+  getCount,
+  checkServer,
+  getAllPaginated,
+} from './lib/payload-client.js'
+import { OUTPUT_DIR, PAYLOAD_API, CONCURRENCY } from './lib/config.js'
+import pg from 'pg'
+import { extractKeys, matchesAnyTombstone, type TombstoneKeys } from './lib/dedup-keys.js'
+
+const tombstoneDb = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+
+async function loadTombstones(collection: string): Promise<TombstoneKeys[]> {
+  const { rows } = await tombstoneDb.query(
+    'SELECT keys FROM duplicate_tombstones WHERE collection = $1',
+    [collection],
+  )
+  return rows.map((r) => r.keys as TombstoneKeys)
+}
+
+function isTombstoned(collection: string, candidate: any, tombstones: TombstoneKeys[]): boolean {
+  if (tombstones.length === 0) return false
+  return matchesAnyTombstone(extractKeys(collection, candidate), tombstones)
+}
+
+const WRITE_CONCURRENCY = CONCURRENCY.PAYLOAD_WRITES
+
+const collectionArg =
+  process.argv.find((a) => a.startsWith('--collection='))?.split('=')[1] || 'all'
+
+// ---------------------------------------------------------------------------
+// Topics
+// ---------------------------------------------------------------------------
+
+const topicIdCache = new Map<string, string>()
+
+async function resolveTopicIds(names: string[]): Promise<string[]> {
+  const ids: string[] = []
+  for (const name of names) {
+    if (topicIdCache.has(name)) {
+      ids.push(topicIdCache.get(name)!)
+    } else {
+      const id = await findByField('topics', 'name', name)
+      if (id) {
+        topicIdCache.set(name, id)
+        ids.push(id)
+      }
+    }
+  }
+  return ids
+}
+
+async function seedTopics() {
+  console.log('\n--- Seeding Topics ---')
+  const existing = await getCount('topics')
+  if (existing > 0) {
+    console.log(`  ${existing} topics already exist, loading IDs...`)
+    // Load all existing topics into cache
+    const allTopics = await getAllPaginated('topics')
+    for (const doc of allTopics) {
+      topicIdCache.set(doc.name, doc.id)
+    }
+    console.log(`  Cached ${topicIdCache.size} topic IDs`)
+    return
+  }
+
+  const topics: { name: string; parent: string | null }[] = JSON.parse(
+    readFileSync(`${OUTPUT_DIR}/topics-seed.json`, 'utf-8'),
+  )
+
+  // Create parent topics first
+  const parents = topics.filter((t) => !t.parent)
+  for (const topic of parents) {
+    const result = await createRecord('topics', { name: topic.name })
+    if (result) topicIdCache.set(topic.name, result.id)
+  }
+  console.log(`  Created ${parents.length} parent topics`)
+
+  // Then children
+  const children = topics.filter((t) => t.parent)
+  for (const topic of children) {
+    const parentId = topicIdCache.get(topic.parent!)
+    const result = await createRecord('topics', { name: topic.name, parent: parentId })
+    if (result) topicIdCache.set(topic.name, result.id)
+  }
+  console.log(`  Created ${children.length} child topics`)
+  console.log(`  Total: ${topicIdCache.size} topics`)
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+async function loadDocuments() {
+  console.log('\n--- Loading Documents ---')
+  const existing = await getCount('documents')
+
+  // Merge Sustainable Library (canonical) + Federal Register notices
+  // (optional add-on file). FR notices have a `documentType` field set
+  // at discovery time; Sustainable Library records get their
+  // documentType later via enrich-document-summaries.ts.
+  const slPath = `${OUTPUT_DIR}/sustainable-library-normalized.json`
+  const frPath = `${OUTPUT_DIR}/discovered-fr-notices.json`
+  const allDocs: any[] = []
+  if (existsSync(slPath)) {
+    const sl = JSON.parse(readFileSync(slPath, 'utf-8'))
+    allDocs.push(...(Array.isArray(sl) ? sl : sl.documents || []))
+  }
+  if (existsSync(frPath)) {
+    const fr = JSON.parse(readFileSync(frPath, 'utf-8'))
+    const frDocs = Array.isArray(fr) ? fr : fr.documents || []
+    allDocs.push(...frDocs)
+    console.log(`  +${frDocs.length} Federal Register notices merged in`)
+  }
+  console.log(`  ${allDocs.length} candidate documents from disk`)
+
+  const tombstones = await loadTombstones('documents')
+  let docs = allDocs.filter((d) => !isTombstoned('documents', d, tombstones))
+  const tombSkipped = allDocs.length - docs.length
+  if (tombSkipped > 0) console.log(`  ${tombSkipped} documents skipped (tombstoned)`)
+
+  // Incremental dedup: when the collection already has rows, only insert
+  // documents whose source_url isn't present. Lets the loader add FR
+  // notices on top of an existing Sustainable Library corpus without
+  // duplicating it. Match Payload's camelCase `sourceUrl`.
+  if (existing > 0) {
+    console.log(`  ${existing} documents already exist; deduping by sourceUrl…`)
+    const existingDocs = await getAllPaginated('documents')
+    const seenUrls = new Set<string>()
+    for (const d of existingDocs as any[]) {
+      if (d?.sourceUrl) seenUrls.add(String(d.sourceUrl))
+    }
+    const before = docs.length
+    docs = docs.filter((d) => !d.sourceUrl || !seenUrls.has(String(d.sourceUrl)))
+    console.log(`  ${before - docs.length} already loaded, ${docs.length} new to insert`)
+    if (docs.length === 0) return
+  }
+
+  // Federal Register notices land with action-tag-driven categories that
+  // don't match the 40-thematic-topic taxonomy by string. Map known
+  // action tags to existing top-level topics so every FR notice gets at
+  // least the universal "Land & Water Management" category required by
+  // the Payload schema. Sustainable Library docs come pre-mapped, so the
+  // fallback only fires when no topic resolved.
+  const FR_TOPIC_FALLBACKS: Record<string, string> = {
+    mining:             'Mining & Mineral Resources',
+    'ESA-listing':      'Biodiversity & Conservation',
+    'critical-habitat': 'Biodiversity & Conservation',
+    recreation:         'Recreation & Tourism',
+    'RMP/LMP':          'Land & Water Management',
+    NOA:                'Land & Water Management',
+    NOI:                'Land & Water Management',
+    EA:                 'Land & Water Management',
+    ROD:                'Land & Water Management',
+    DEIS:               'Land & Water Management',
+    FEIS:               'Land & Water Management',
+    FONSI:              'Land & Water Management',
+    CE:                 'Land & Water Management',
+    BiOp:               'Biodiversity & Conservation',
+    'vegetation-mgmt':  'Forest Ecology',
+  }
+  const FR_DEFAULT_TOPIC = 'Land & Water Management'
+
+  // Track post-load SQL updates needed for fields not exposed by Payload
+  // (documentType is a SQL-only column populated by enrichment).
+  const documentTypeBySourceUrl = new Map<string, string>()
+
+  await runBatch(
+    docs,
+    WRITE_CONCURRENCY,
+    async (doc) => {
+      let categoryNames: string[] = Array.isArray(doc.categories) ? [...doc.categories] : []
+      let categoryIds = await resolveTopicIds(categoryNames)
+
+      // FR notice fallback: walk known action tags + always-add default.
+      const isFR = doc.documentType?.startsWith('federal_')
+      if (isFR && categoryIds.length === 0) {
+        const wanted = new Set<string>([FR_DEFAULT_TOPIC])
+        for (const tag of categoryNames) {
+          const topic = FR_TOPIC_FALLBACKS[tag]
+          if (topic) wanted.add(topic)
+        }
+        categoryIds = await resolveTopicIds(Array.from(wanted))
+      }
+
+      // Stash documentType for a post-load SQL update — it's not a
+      // Payload field, so it can't go through createRecord.
+      if (doc.documentType && doc.sourceUrl) {
+        documentTypeBySourceUrl.set(doc.sourceUrl, doc.documentType)
+      }
+
+      const result = await createRecord('documents', {
+        title: doc.title,
+        summary: doc.summary || undefined,
+        categories: categoryIds.length > 0 ? categoryIds : undefined,
+        dateOriginal: doc.dateOriginal || undefined,
+        geographicScope: doc.geographicScope?.length > 0 ? doc.geographicScope : undefined,
+        pdfLink: doc.sourceFile || undefined,
+        sourceUrl: doc.sourceUrl || undefined,
+        ingestionDate: doc.ingestionDate || undefined,
+      })
+      return result ? 'success' : 'skipped'
+    },
+    'Documents',
+  )
+
+  // Set document_type for the rows we just inserted. The column is
+  // owned by enrich-document-summaries.ts in steady state; we're just
+  // pre-populating it for FR notices where the type is structurally
+  // knowable at ingest.
+  if (documentTypeBySourceUrl.size > 0) {
+    const pgUrl = process.env.DATABASE_URL
+    if (pgUrl) {
+      const { default: pg } = await import('pg')
+      const pool = new pg.Pool({ connectionString: pgUrl })
+      let updated = 0
+      for (const [url, type] of documentTypeBySourceUrl) {
+        const { rowCount } = await pool.query(
+          `UPDATE documents SET document_type = $1 WHERE source_url = $2 AND document_type IS NULL`,
+          [type, url],
+        )
+        updated += rowCount ?? 0
+      }
+      console.log(`  ${updated} document_type values set via post-load SQL`)
+      await pool.end()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Publications
+// ---------------------------------------------------------------------------
+
+async function loadPublications() {
+  console.log('\n--- Loading Publications ---')
+  const existingCount = await getCount('publications')
+  const tombstones = await loadTombstones('publications')
+  if (tombstones.length > 0) console.log(`  ${tombstones.length} publication tombstones loaded`)
+
+  let pubs: any[]
+
+  if (existingCount === 0) {
+    // Fresh load: main file + discovered
+    pubs = existsSync(`${OUTPUT_DIR}/publications-normalized.json`)
+      ? JSON.parse(readFileSync(`${OUTPUT_DIR}/publications-normalized.json`, 'utf-8'))
+      : []
+    const discoveredFiles = readdirSync(OUTPUT_DIR).filter(
+      (f) => f.startsWith('publications-discovered-') && f.endsWith('.json'),
+    )
+    for (const file of discoveredFiles) {
+      const discovered = JSON.parse(readFileSync(`${OUTPUT_DIR}/${file}`, 'utf-8'))
+      pubs.push(...discovered)
+      console.log(`  Merged ${discovered.length} from ${file}`)
+    }
+    const beforeTomb = pubs.length
+    pubs = pubs.filter((p) => !isTombstoned('publications', p, tombstones))
+    if (beforeTomb !== pubs.length) console.log(`  ${beforeTomb - pubs.length} skipped (tombstoned)`)
+  } else {
+    // Incremental: load new from main file + discovered files, dedup against existing
+    console.log(`  ${existingCount} publications already exist, loading new only...`)
+    pubs = []
+
+    // Build dedup index from existing publications
+    console.log('  Building dedup index from existing publications...')
+    const existingPubs = await getAllPaginated('publications')
+    const existingDois = new Set<string>()
+    const existingByTitleYear = new Map<string, number[]>() // title_lower → [years]
+    for (const p of existingPubs) {
+      if (p.doi) existingDois.add((p.doi as string).toLowerCase())
+      if (p.title) {
+        const key = (p.title as string).toLowerCase()
+        if (!existingByTitleYear.has(key)) existingByTitleYear.set(key, [])
+        existingByTitleYear.get(key)!.push(p.year as number || 0)
+      }
+    }
+    console.log(`  Dedup index: ${existingDois.size} DOIs, ${existingByTitleYear.size} unique titles`)
+
+    // Check main normalized file for imported publications
+    const mainFile = `${OUTPUT_DIR}/publications-normalized.json`
+    if (existsSync(mainFile)) {
+      const mainPubs = JSON.parse(readFileSync(mainFile, 'utf-8'))
+      let added = 0
+      let dupes = 0
+      let tombDup = 0
+      for (const pub of mainPubs) {
+        if (pub.doi && existingDois.has(pub.doi.toLowerCase())) { dupes++; continue }
+        if (pub.title) {
+          const titleKey = pub.title.toLowerCase()
+          const existingYears = existingByTitleYear.get(titleKey)
+          if (existingYears) {
+            const yearMatch = existingYears.some((y: number) => !pub.year || !y || Math.abs(pub.year - y) <= 1)
+            if (yearMatch) { dupes++; continue }
+          }
+        }
+        if (isTombstoned('publications', pub, tombstones)) { tombDup++; continue }
+        pubs.push(pub)
+        if (pub.doi) existingDois.add(pub.doi.toLowerCase())
+        if (pub.title) {
+          const key = pub.title.toLowerCase()
+          if (!existingByTitleYear.has(key)) existingByTitleYear.set(key, [])
+          existingByTitleYear.get(key)!.push(pub.year || 0)
+        }
+        added++
+      }
+      console.log(`  publications-normalized.json: ${added} new, ${dupes} duplicates${tombDup ? `, ${tombDup} tombstoned` : ''} (of ${mainPubs.length})`)
+    }
+
+    // Check discovered files
+    const discoveredFiles = readdirSync(OUTPUT_DIR).filter(
+      (f) => f.startsWith('publications-discovered-') && f.endsWith('.json'),
+    )
+    for (const file of discoveredFiles) {
+      const discovered = JSON.parse(readFileSync(`${OUTPUT_DIR}/${file}`, 'utf-8'))
+      let added = 0
+      let doiDup = 0
+      let titleDup = 0
+      let tombDup = 0
+      for (const pub of discovered) {
+        // Tier 1: DOI match
+        if (pub.doi && existingDois.has(pub.doi.toLowerCase())) { doiDup++; continue }
+
+        // Tier 2: Exact title + close year (±1)
+        if (pub.title) {
+          const titleKey = pub.title.toLowerCase()
+          const existingYears = existingByTitleYear.get(titleKey)
+          if (existingYears) {
+            const yearMatch = existingYears.some((y: number) => !pub.year || !y || Math.abs(pub.year - y) <= 1)
+            if (yearMatch) { titleDup++; continue }
+          }
+        }
+
+        // Tier 3: tombstoned (deliberately deleted by an admin)
+        if (isTombstoned('publications', pub, tombstones)) { tombDup++; continue }
+
+        pubs.push(pub)
+        // Add to index so later items in the file don't duplicate earlier ones
+        if (pub.doi) existingDois.add(pub.doi.toLowerCase())
+        if (pub.title) {
+          const key = pub.title.toLowerCase()
+          if (!existingByTitleYear.has(key)) existingByTitleYear.set(key, [])
+          existingByTitleYear.get(key)!.push(pub.year || 0)
+        }
+        added++
+      }
+      console.log(`  ${file}: ${added} new, ${doiDup} DOI dupes, ${titleDup} title dupes${tombDup ? `, ${tombDup} tombstoned` : ''} (of ${discovered.length})`)
+    }
+    console.log(`  ${pubs.length} new publications to load`)
+    if (pubs.length === 0) return
+  }
+
+  await runBatch(
+    pubs,
+    WRITE_CONCURRENCY,
+    async (pub) => {
+      const result = await createRecord('publications', {
+        title: pub.title,
+        authors:
+          pub.authors?.length > 0
+            ? pub.authors.map((a: any) => ({ given: a.given || '', family: a.family || '' }))
+            : [{ given: '', family: 'Unknown' }],
+        year: pub.year || 0,
+        publicationType: pub.publicationType || 'other',
+        journal: pub.journal || undefined,
+        volume: pub.volume || undefined,
+        issue: pub.issue || undefined,
+        pages: pub.pages || undefined,
+        doi: pub.doi || undefined,
+        publisher: pub.publisher || undefined,
+        abstract: pub.abstract || undefined,
+        keywords:
+          pub.keywords?.length > 0
+            ? pub.keywords
+            : undefined,
+        pdfLink: pub.pdfLink || undefined,
+        externalUrl: pub.externalUrl || undefined,
+        editors:
+          pub.editors?.length > 0
+            ? pub.editors.map((e: any) => ({ given: e.given || '', family: e.family || '' }))
+            : undefined,
+        dataSource: pub._source || 'imported',
+        discoveryMethod: pub._discoveryMethod || 'import',
+      })
+      return result ? 'success' : 'skipped'
+    },
+    'Publications',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Datasets
+// ---------------------------------------------------------------------------
+
+async function loadDatasets() {
+  console.log('\n--- Loading Datasets ---')
+  const existingCount = await getCount('datasets')
+  const tombstones = await loadTombstones('datasets')
+  if (tombstones.length > 0) console.log(`  ${tombstones.length} dataset tombstones loaded`)
+
+  let datasets: any[]
+
+  if (existingCount === 0) {
+    // Fresh load
+    datasets = JSON.parse(readFileSync(`${OUTPUT_DIR}/data-catalog-normalized.json`, 'utf-8'))
+    const beforeTomb = datasets.length
+    datasets = datasets.filter((d) => !isTombstoned('datasets', d, tombstones))
+    if (beforeTomb !== datasets.length) console.log(`  ${beforeTomb - datasets.length} skipped (tombstoned)`)
+  } else {
+    // Incremental: only load discovered datasets, dedup against existing
+    console.log(`  ${existingCount} datasets already exist, loading discovered only...`)
+    datasets = []
+    const discoveredFiles = readdirSync(OUTPUT_DIR).filter(
+      (f) => f.startsWith('datasets-discovered') && f.endsWith('.json'),
+    )
+    if (discoveredFiles.length === 0) {
+      console.log(`  No discovered dataset files found. Nothing to add.`)
+      return
+    }
+
+    // Build dedup index
+    console.log('  Building dedup index from existing datasets...')
+    const existingDs = await getAllPaginated('datasets')
+    const existingDois = new Set<string>()
+    const existingTitles = new Set<string>()
+    for (const d of existingDs) {
+      if (d.doi) existingDois.add((d.doi as string).toLowerCase())
+      if (d.title) existingTitles.add((d.title as string).toLowerCase())
+    }
+    console.log(`  Dedup index: ${existingDois.size} DOIs, ${existingTitles.size} titles`)
+
+    for (const file of discoveredFiles) {
+      const discovered = JSON.parse(readFileSync(`${OUTPUT_DIR}/${file}`, 'utf-8'))
+      let added = 0
+      let dupes = 0
+      let tombDup = 0
+      for (const ds of discovered) {
+        if (ds.doi && existingDois.has(ds.doi.toLowerCase())) { dupes++; continue }
+        if (ds.title && existingTitles.has(ds.title.toLowerCase())) { dupes++; continue }
+        if (isTombstoned('datasets', ds, tombstones)) { tombDup++; continue }
+        datasets.push(ds)
+        if (ds.doi) existingDois.add(ds.doi.toLowerCase())
+        if (ds.title) existingTitles.add(ds.title.toLowerCase())
+        added++
+      }
+      console.log(`  ${file}: ${added} new, ${dupes} duplicates${tombDup ? `, ${tombDup} tombstoned` : ''} (of ${discovered.length})`)
+    }
+    console.log(`  ${datasets.length} new datasets to load`)
+    if (datasets.length === 0) return
+  }
+
+  // Dataset tags are freeform — create any new topics as needed
+  const allTags = new Set<string>()
+  for (const ds of datasets) {
+    for (const tag of ds.tags || []) {
+      if (tag && !topicIdCache.has(tag)) allTags.add(tag)
+    }
+  }
+  if (allTags.size > 0) {
+    console.log(`  Creating ${allTags.size} new topics from dataset tags...`)
+    for (const tag of allTags) {
+      const result = await createRecord('topics', { name: tag })
+      if (result) topicIdCache.set(tag, result.id)
+    }
+  }
+
+  await runBatch(
+    datasets,
+    WRITE_CONCURRENCY,
+    async (ds) => {
+      const tagIds = await resolveTopicIds(ds.tags || [])
+
+      const result = await createRecord('datasets', {
+        title: ds.title,
+        description: ds.description || undefined,
+        creators:
+          ds.creators?.length > 0
+            ? ds.creators.map((c: any) => ({
+                name: c.name,
+                orcid: c.orcid || undefined,
+                affiliation: c.affiliation || undefined,
+              }))
+            : [{ name: institution.shortName }],
+        publicationYear: ds.publicationYear || 0,
+        doi: ds.doi || undefined,
+        downloadUrl: ds.downloadUrl || undefined,
+        repository: ds.repository || undefined,
+        externalCatalogUrl: ds.externalCatalogUrl || undefined,
+        spatialDescription: ds.spatialDescription || undefined,
+        spatialExtent: ds.spatialExtent || undefined,
+        temporalExtent: ds.temporalExtent || undefined,
+        tags: tagIds.length > 0 ? tagIds : undefined,
+        license: ds.license || undefined,
+        resourceType: ds.resourceType || 'dataset',
+        dataPublisher: ds.dataPublisher || institution.shortName,
+        methods: ds._methods || undefined,
+        fullText: ds._metadataFullText || undefined,
+      })
+      return result ? 'success' : 'skipped'
+    },
+    'Datasets',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  console.log('Payload CMS Data Loader')
+  console.log('=======================')
+
+  // Check server is running
+  const serverUp = await checkServer()
+  if (!serverUp) {
+    console.error('ERROR: Payload dev server not running. Start it with: npm run dev')
+    process.exit(1)
+  }
+
+  console.log('\nStep 0: Authenticating...')
+  await ensureAuth()
+
+  const collections =
+    collectionArg === 'all'
+      ? ['topics', 'documents', 'publications', 'datasets']
+      : [collectionArg]
+
+  for (const collection of collections) {
+    switch (collection) {
+      case 'topics':
+        await seedTopics()
+        break
+      case 'documents':
+        if (topicIdCache.size === 0) await seedTopics()
+        await loadDocuments()
+        break
+      case 'publications':
+        await loadPublications()
+        break
+      case 'datasets':
+        if (topicIdCache.size === 0) await seedTopics()
+        await loadDatasets()
+        break
+      default:
+        console.error(`Unknown collection: ${collection}`)
+        process.exit(1)
+    }
+  }
+
+  // Final counts
+  console.log('\n========== Final Counts ==========')
+  for (const col of ['topics', 'documents', 'publications', 'datasets']) {
+    const count = await getCount(col)
+    console.log(`  ${col}: ${count}`)
+  }
+}
+
+main().catch((err) => {
+  console.error('Error:', err)
+  process.exit(1)
+})
